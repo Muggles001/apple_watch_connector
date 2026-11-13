@@ -79,6 +79,7 @@ jobs:
         working-directory: apple-watch-companion
         run: |
           flutter pub get --enforce-lockfile
+          flutter gen-l10n
           flutter build apk --release -t lib/main.dart
 
       - name: Verify matching signatures
