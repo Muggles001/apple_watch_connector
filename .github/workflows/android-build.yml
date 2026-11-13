@@ -1,0 +1,98 @@
+name: Android build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/android-build.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      BUILD_TOOLS: 36.1.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-36
+            build-tools;36.1.0
+            ndk;28.2.13676358
+            cmake;3.22.1
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-linux-android
+          rustup default stable
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.4
+          cache: true
+
+      # Bridge and Companion must share one certificate: Companion IPC is signature-protected.
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.WATCH_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.WATCH_KEYSTORE_PASSWORD }}
+        run: |
+          dir="$RUNNER_TEMP/signing"
+          mkdir -p "$dir"
+          echo "$KEYSTORE_B64" | base64 -d > "$dir/watch-release.jks"
+          printf 'storeFile=watch-release.jks\nstorePassword=%s\nkeyAlias=watch\nkeyPassword=%s\n' \
+            "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > "$dir/signing.properties"
+          echo "WATCH_RELEASE_SIGNING_PROPERTIES=$dir/signing.properties" >> "$GITHUB_ENV"
+
+      # The camera-pairing asset is generated from Apple firmware that is not in the
+      # public repository; without it the app builds and camera pairing is unavailable.
+      - name: Skip optical asset
+        run: |
+          printf '\ntasks.named("prepareOpticalAsset") { enabled = false }\n' \
+            >> apple-watch-companion/android/app/build.gradle.kts
+
+      - name: Build Bridge APK
+        working-directory: apple-watch-bridge
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/build
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Package Magisk module
+        run: |
+          bash apple-watch-bridge/tool/build_magisk_module.sh \
+            apple-watch-bridge/app/build/outputs/apk/release/app-release.apk \
+            out/apple-watch-bridge-magisk.zip
+
+      - name: Build Companion APK
+        working-directory: apple-watch-companion
+        run: |
+          flutter pub get --enforce-lockfile
+          flutter build apk --release -t lib/main.dart
+
+      - name: Verify matching signatures
+        run: |
+          signer="$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner"
+          bridge=apple-watch-bridge/app/build/outputs/apk/release/app-release.apk
+          companion=apple-watch-companion/build/app/outputs/flutter-apk/app-release.apk
+          b=$("$signer" verify --print-certs "$bridge" | grep 'SHA-256 digest')
+          c=$("$signer" verify --print-certs "$companion" | grep 'SHA-256 digest')
+          echo "Bridge:    $b"
+          echo "Companion: $c"
+          test "$b" = "$c"
+          cp "$bridge" out/apple-watch-bridge.apk
+          cp "$companion" out/apple-watch-companion.apk
+          (cd out && sha256sum * > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-watch-android
+          path: out/
