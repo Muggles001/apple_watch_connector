@@ -10030,6 +10030,87 @@ final class HalTransportSession {
         }
     }
 
+    private static final int OPCODE_LE_SET_EXTENDED_SCAN_PARAMETERS = 0x2041;
+    private static final int OPCODE_LE_SET_EXTENDED_SCAN_ENABLE = 0x2042;
+    private static final long EXTENDED_SCAN_PROBE_MS = 30_000;
+
+    /**
+     * Diagnostic only, run after the legacy scan has already failed: Watch
+     * setup advertisements sent as Bluetooth 5 extended PDUs never reach a
+     * legacy scan. Extended scan commands make later legacy scan/connect
+     * commands invalid until reset, so the session must end after this probe.
+     */
+    private void probeExtendedScan() {
+        try {
+            sendCommandComplete(HciCodec.OPCODE_LE_SET_SCAN_ENABLE, HciCodec.scanEnableParameters(false));
+            scanEnabled = false;
+            // LE event mask bits 0, 1 and 12: connection complete, advertising
+            // report and extended advertising report.
+            sendCommandComplete(HciCodec.OPCODE_LE_SET_EVENT_MASK,
+                    new byte[]{0x03, 0x10, 0, 0, 0, 0, 0, 0});
+            sendCommandComplete(OPCODE_LE_SET_EXTENDED_SCAN_PARAMETERS, new byte[]{
+                    (byte) localIdentity.addressType(), 0x00, 0x01,
+                    0x01, 0x60, 0x00, 0x60, 0x00});
+            sendCommandComplete(OPCODE_LE_SET_EXTENDED_SCAN_ENABLE,
+                    new byte[]{0x01, 0x00, 0x00, 0x00, 0x00, 0x00});
+        } catch (Exception unsupported) {
+            log("EXTENDED SCAN PROBE: could not start: " + unsupported.getMessage());
+            return;
+        }
+        log("EXTENDED SCAN PROBE: active on LE 1M for " + EXTENDED_SCAN_PROBE_MS + " ms.");
+        ScanDiagnostics diagnostics = new ScanDiagnostics(BridgeClock.elapsedRealtime());
+        int nonLegacy = 0;
+        long deadline = BridgeClock.elapsedRealtime() + EXTENDED_SCAN_PROBE_MS;
+        try {
+            while (BridgeClock.elapsedRealtime() < deadline) {
+                diagnostics.maybeLog(BridgeClock.elapsedRealtime());
+                Packet packet;
+                try { packet = nextPacket(Math.min(deadline, BridgeClock.elapsedRealtime() + 250)); }
+                catch (TimeoutException elapsed) { continue; }
+                if (packet.kind != PacketKind.EVENT) continue;
+                List<HciCodec.AdvertisingReport> reports = parseExtendedAdvertisingReports(packet.bytes);
+                for (HciCodec.AdvertisingReport report : reports) {
+                    if ((report.eventType & 0x10) == 0) nonLegacy++;
+                }
+                diagnostics.observe(packet.bytes, reports);
+            }
+        } catch (Exception interrupted) {
+            log("EXTENDED SCAN PROBE: stopped early: " + interrupted.getMessage());
+        }
+        log("EXTENDED SCAN PROBE: nonLegacyReports=" + nonLegacy + ".");
+        diagnostics.write("EXTENDED SCAN SUMMARY FINAL");
+        try {
+            sendCommandComplete(OPCODE_LE_SET_EXTENDED_SCAN_ENABLE,
+                    new byte[]{0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+        } catch (Exception ignored) {
+            log("EXTENDED SCAN PROBE: disable was not confirmed; HAL close follows.");
+        }
+    }
+
+    // LE Extended Advertising Report (subevent 0x0D); the setup payload field is
+    // filled by the same AD parser used for legacy reports.
+    private static List<HciCodec.AdvertisingReport> parseExtendedAdvertisingReports(byte[] event) {
+        List<HciCodec.AdvertisingReport> reports = new ArrayList<>();
+        if (event.length < 4 || (event[0] & 0xff) != 0x3E || (event[2] & 0xff) != 0x0D) return reports;
+        int end = Math.min(event.length, (event[1] & 0xff) + 2);
+        int count = event[3] & 0xff;
+        int offset = 4;
+        for (int index = 0; index < count && offset + 24 <= end; index++) {
+            int eventType = (event[offset] & 0xff) | ((event[offset + 1] & 0xff) << 8);
+            int addressType = event[offset + 2] & 0xff;
+            byte[] address = Arrays.copyOfRange(event, offset + 3, offset + 9);
+            int rssi = event[offset + 13];
+            int dataLength = event[offset + 23] & 0xff;
+            int dataStart = offset + 24;
+            if (dataStart + dataLength > end) break;
+            byte[] data = Arrays.copyOfRange(event, dataStart, dataStart + dataLength);
+            reports.add(new HciCodec.AdvertisingReport(eventType, addressType, address, rssi, data,
+                    HciCodec.parseWatchSetupPayload(data)));
+            offset = dataStart + dataLength;
+        }
+        return reports;
+    }
+
     private HciCodec.AdvertisingReport awaitTarget() throws Exception {
         long deadline = BridgeClock.elapsedRealtime() + SCAN_TIMEOUT_MS;
         WatchSetupTargetSelector selector = new WatchSetupTargetSelector();
@@ -10088,6 +10169,7 @@ final class HalTransportSession {
             }
         }
         diagnostics.write("SCAN SUMMARY FINAL");
+        probeExtendedScan();
         throw new HostException("Complete target Watch setup advertisement not found in "
                 + SCAN_TIMEOUT_MS + " ms; return the Watch to new-pair animation");
     }
