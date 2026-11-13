@@ -10041,13 +10041,20 @@ final class HalTransportSession {
      * commands invalid until reset, so the session must end after this probe.
      */
     private void probeExtendedScan() {
+        byte[] address = null;
         try {
-            sendCommandComplete(HciCodec.OPCODE_LE_SET_SCAN_ENABLE, HciCodec.scanEnableParameters(false));
+            // Controllers reject extended scan commands (status 0x0C) once
+            // legacy scanning has been used, until the next HCI Reset.
+            sendCommandComplete(HciCodec.OPCODE_RESET, new byte[0]);
             scanEnabled = false;
+            sendCommandComplete(HciCodec.OPCODE_SET_EVENT_MASK, HciCodec.classicEventMask());
             // LE event mask bits 0, 1 and 12: connection complete, advertising
             // report and extended advertising report.
             sendCommandComplete(HciCodec.OPCODE_LE_SET_EVENT_MASK,
                     new byte[]{0x03, 0x10, 0, 0, 0, 0, 0, 0});
+            address = localIdentity.address();
+            sendCommandComplete(HciCodec.OPCODE_LE_SET_RANDOM_ADDRESS,
+                    HciCodec.buildLeSetRandomAddressParameters(address));
             sendCommandComplete(OPCODE_LE_SET_EXTENDED_SCAN_PARAMETERS, new byte[]{
                     (byte) localIdentity.addressType(), 0x00, 0x01,
                     0x01, 0x60, 0x00, 0x60, 0x00});
@@ -10056,6 +10063,8 @@ final class HalTransportSession {
         } catch (Exception unsupported) {
             log("EXTENDED SCAN PROBE: could not start: " + unsupported.getMessage());
             return;
+        } finally {
+            wipe(address);
         }
         log("EXTENDED SCAN PROBE: active on LE 1M for " + EXTENDED_SCAN_PROBE_MS + " ms.");
         ScanDiagnostics diagnostics = new ScanDiagnostics(BridgeClock.elapsedRealtime());
