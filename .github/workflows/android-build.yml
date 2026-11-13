@@ -64,7 +64,10 @@ jobs:
         working-directory: apple-watch-bridge
         env:
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/build
-        run: ./gradlew --no-daemon :app:assembleRelease
+        run: |
+          # The Gradle task sets the NDK linker/CC but not AR, which ring's cc-rs build needs.
+          export AR_aarch64_linux_android="$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          ./gradlew --no-daemon :app:assembleRelease
 
       - name: Package Magisk module
         run: |
