@@ -32,11 +32,12 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Explicit root-side owner of the standard VINTF Bluetooth HCI HAL.
+ * Explicit root-side owner of the standard Bluetooth HCI HAL (AIDL, or HIDL
+ * 1.0 where the AIDL HAL is not declared).
  *
  * <p>This class is launched with {@code app_process}; it is never an Android
- * component and is not started at boot. It refuses to run unless the target,
- * root UID, and disabled stock Bluetooth state all match.</p>
+ * component and is not started at boot. It refuses to run unless the root UID
+ * and disabled stock Bluetooth state both match.</p>
  */
 public final class RootBluetoothHalHost extends ProtocolHost {
     private static final String HAL_INSTANCE =
@@ -102,24 +103,12 @@ public final class RootBluetoothHalHost extends ProtocolHost {
             requireStockBluetoothOff();
             log("STOCK BLUETOOTH OFF: raw HAL ownership may begin.");
 
-            IBinder binder = waitForHalBinder();
-            if (binder == null) {
-                throw new HostException(
-                        "Bluetooth HCI HAL did not appear within "
-                                + HAL_LOOKUP_TIMEOUT_MS
-                                + " ms");
-            }
-            log("HAL BINDER FOUND: " + HAL_INSTANCE + ".");
-
-            IBluetoothHci hci = IBluetoothHci.Stub.asInterface(binder);
-            if (hci == null) {
-                throw new HostException("Cannot create IBluetoothHci proxy");
-            }
+            BluetoothController controller = openController();
             boolean commitAuthorized =
                     isCommitAuthorized(args);
             log("ROOT HAL START: commitAuthorized=" + commitAuthorized);
             session = new HalTransportSession(
-                    new AndroidBluetoothController(hci),
+                    controller,
                     stopRequested,
                     pinInputs,
                     bondStoreResults,
@@ -237,11 +226,27 @@ public final class RootBluetoothHalHost extends ProtocolHost {
                     "Root HAL host requires uid=0; observed uid="
                             + Process.myUid());
         }
-        if (!"OnePlus".equalsIgnoreCase(Build.MANUFACTURER)
-                || !"CPH2653".equalsIgnoreCase(Build.MODEL)) {
-            throw new HostException(
-                    "This build is fail-closed to OnePlus CPH2653");
+    }
+
+    // waitForDeclaredService returns null at once when the VINTF manifest does
+    // not declare the AIDL HAL, so HIDL-only devices fall through immediately.
+    private static BluetoothController openController() throws HostException, IOException {
+        IBinder binder = waitForHalBinder();
+        if (binder != null) {
+            log("HAL BINDER FOUND: " + HAL_INSTANCE + ".");
+            IBluetoothHci hci = IBluetoothHci.Stub.asInterface(binder);
+            if (hci == null) {
+                throw new HostException("Cannot create IBluetoothHci proxy");
+            }
+            return new AndroidBluetoothController(hci);
         }
+        HidlBluetoothController hidl = HidlBluetoothController.openOrNull();
+        if (hidl == null) {
+            throw new HostException("No Bluetooth HCI HAL: neither " + HAL_INSTANCE
+                    + " nor " + HidlBluetoothController.HCI_DESCRIPTOR + "/default is available");
+        }
+        log("HIDL HAL FOUND: " + HidlBluetoothController.HCI_DESCRIPTOR + "/default.");
+        return hidl;
     }
 
     private static boolean isSmpRecoveryInvocation(

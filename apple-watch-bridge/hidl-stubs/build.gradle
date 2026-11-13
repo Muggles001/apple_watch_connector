@@ -1,0 +1,14 @@
+// Compile-time signatures for framework HIDL classes (@SystemApi, absent from
+// the public SDK). Never packaged: the device boot classpath supplies them.
+plugins {
+    id "java-library"
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    compileOnly files("${System.getenv('ANDROID_HOME') ?: ''}/platforms/android-36/android.jar")
+}
