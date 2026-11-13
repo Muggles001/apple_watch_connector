@@ -9961,6 +9961,9 @@ final class HalTransportSession {
         private int legacyReports;
         private int setupPayloads;
         private int bestSetupRssi = Integer.MIN_VALUE;
+        private final java.util.TreeMap<Integer, Integer> fe25Subtypes = new java.util.TreeMap<>();
+        private final java.util.TreeMap<Integer, Integer> appleTypes = new java.util.TreeMap<>();
+        private final java.util.LinkedHashMap<String, Integer> fe25Samples = new java.util.LinkedHashMap<>();
 
         ScanDiagnostics(long now) {
             nextLog = now + INTERVAL_MS;
@@ -9973,9 +9976,37 @@ final class HalTransportSession {
             }
             legacyReports += reports.size();
             for (HciCodec.AdvertisingReport report : reports) {
+                inspectAppleFields(report);
                 if (report.setup == null) continue;
                 setupPayloads++;
                 bestSetupRssi = Math.max(bestSetupRssi, report.rssi);
+            }
+        }
+
+        // Walks AD structures directly so FE25 subtypes and Apple manufacturer
+        // types the setup parser rejects are still counted.
+        private void inspectAppleFields(HciCodec.AdvertisingReport report) {
+            byte[] data = report.data;
+            if (data == null) return;
+            int offset = 0;
+            while (offset < data.length) {
+                int length = data[offset] & 0xff;
+                if (length == 0 || offset + 1 + length > data.length) return;
+                int type = data[offset + 1] & 0xff;
+                int value = offset + 2;
+                int end = offset + 1 + length;
+                if (type == 0x16 && end - value >= 3
+                        && (data[value] & 0xff) == 0x25 && (data[value + 1] & 0xff) == 0xFE) {
+                    fe25Subtypes.merge(data[value + 2] & 0x7F, 1, Integer::sum);
+                    String field = HciCodec.toHex(java.util.Arrays.copyOfRange(data, offset, end));
+                    if (fe25Samples.size() < 4 && !fe25Samples.containsKey(field)) {
+                        fe25Samples.put(field, report.rssi);
+                    }
+                } else if (type == 0xFF && end - value >= 3
+                        && (data[value] & 0xff) == 0x4C && data[value + 1] == 0) {
+                    appleTypes.merge(data[value + 2] & 0xff, 1, Integer::sum);
+                }
+                offset = end;
             }
         }
 
@@ -9989,7 +10020,13 @@ final class HalTransportSession {
             ProtocolHost.log(label + ": events=" + events + " leSubevents=" + leSubevents
                     + " legacyReports=" + legacyReports + " fe25SetupPayloads=" + setupPayloads
                     + (setupPayloads > 0 ? " bestSetupRssi=" + bestSetupRssi : "")
+                    + " fe25Subtypes=" + fe25Subtypes + " appleMfgTypes=" + appleTypes
                     + "; addresses logged=false.");
+            if (label.endsWith("FINAL")) {
+                for (java.util.Map.Entry<String, Integer> sample : fe25Samples.entrySet()) {
+                    ProtocolHost.log("SCAN FE25 SAMPLE: field=" + sample.getKey() + " rssi=" + sample.getValue());
+                }
+            }
         }
     }
 
