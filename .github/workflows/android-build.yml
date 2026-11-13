@@ -100,3 +100,10 @@ jobs:
         with:
           name: apple-watch-android
           path: out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-watch-bridge
+          path: |
+            out/apple-watch-bridge.apk
+            out/apple-watch-bridge-magisk.zip

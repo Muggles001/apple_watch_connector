@@ -9949,13 +9949,59 @@ final class HalTransportSession {
                                 decoder.bufferedBytes()));
     }
 
+    /**
+     * Separates "no advertising reports reach the host" from "the Watch is not
+     * advertising setup data" when a scan finds no target; logs counts only.
+     */
+    private static final class ScanDiagnostics {
+        private static final long INTERVAL_MS = 10_000;
+        private final java.util.TreeMap<Integer, Integer> leSubevents = new java.util.TreeMap<>();
+        private long nextLog;
+        private int events;
+        private int legacyReports;
+        private int setupPayloads;
+        private int bestSetupRssi = Integer.MIN_VALUE;
+
+        ScanDiagnostics(long now) {
+            nextLog = now + INTERVAL_MS;
+        }
+
+        void observe(byte[] event, List<HciCodec.AdvertisingReport> reports) {
+            events++;
+            if (event.length > 2 && (event[0] & 0xff) == 0x3E) {
+                leSubevents.merge(event[2] & 0xff, 1, Integer::sum);
+            }
+            legacyReports += reports.size();
+            for (HciCodec.AdvertisingReport report : reports) {
+                if (report.setup == null) continue;
+                setupPayloads++;
+                bestSetupRssi = Math.max(bestSetupRssi, report.rssi);
+            }
+        }
+
+        void maybeLog(long now) {
+            if (now < nextLog) return;
+            nextLog = now + INTERVAL_MS;
+            write("SCAN SUMMARY");
+        }
+
+        void write(String label) {
+            ProtocolHost.log(label + ": events=" + events + " leSubevents=" + leSubevents
+                    + " legacyReports=" + legacyReports + " fe25SetupPayloads=" + setupPayloads
+                    + (setupPayloads > 0 ? " bestSetupRssi=" + bestSetupRssi : "")
+                    + "; addresses logged=false.");
+        }
+    }
+
     private HciCodec.AdvertisingReport awaitTarget() throws Exception {
         long deadline = BridgeClock.elapsedRealtime() + SCAN_TIMEOUT_MS;
         WatchSetupTargetSelector selector = new WatchSetupTargetSelector();
         WatchDiscoverySelection<HciCodec.AdvertisingReport> choices = new WatchDiscoverySelection<>();
         java.util.Map<String, Long> announced = new java.util.HashMap<>();
         int incomplete = 0;
+        ScanDiagnostics diagnostics = new ScanDiagnostics(BridgeClock.elapsedRealtime());
         while (BridgeClock.elapsedRealtime() < deadline) {
+            diagnostics.maybeLog(BridgeClock.elapsedRealtime());
             if (COMPANION_DISCOVERY.get()) {
                 HciCodec.AdvertisingReport selected = choices.select(COMPANION_WATCH_SELECTIONS.poll(), BridgeClock.elapsedRealtime());
                 if (selected != null) {
@@ -9968,7 +10014,9 @@ final class HalTransportSession {
             try { packet = nextPacket(Math.min(deadline, BridgeClock.elapsedRealtime() + 250)); }
             catch (TimeoutException elapsed) { continue; }
             if (packet.kind != PacketKind.EVENT) continue;
-            for (HciCodec.AdvertisingReport report : HciCodec.parseLegacyAdvertisingReports(packet.bytes)) {
+            List<HciCodec.AdvertisingReport> reports = HciCodec.parseLegacyAdvertisingReports(packet.bytes);
+            diagnostics.observe(packet.bytes, reports);
+            for (HciCodec.AdvertisingReport report : reports) {
                 if (report.address != null && rejectedSetupCandidates.contains(HciCodec.toHex(report.address))) continue;
                 HciCodec.AdvertisingReport target = selector.accept(report, BridgeClock.elapsedRealtime());
                 if (target != null) {
@@ -10002,6 +10050,7 @@ final class HalTransportSession {
                 }
             }
         }
+        diagnostics.write("SCAN SUMMARY FINAL");
         throw new HostException("Complete target Watch setup advertisement not found in "
                 + SCAN_TIMEOUT_MS + " ms; return the Watch to new-pair animation");
     }
